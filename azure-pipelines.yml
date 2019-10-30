@@ -4,6 +4,7 @@ trigger:
     include:
     - master
     - dev*
+    - refs/tags/*
 
 pr:
   - master
@@ -41,7 +42,7 @@ jobs:
   - checkout: self
   - task: GoTool@0
     inputs:
-      version: '1.12'
+      version: '1.13'
   - script: |
       bash ./testing/coverage/coverall
     workingDirectory: '$(Build.SourcesDirectory)'
@@ -66,7 +67,7 @@ jobs:
   - checkout: self
   - task: GoTool@0
     inputs:
-      version: '1.12'
+      version: '1.13'
   - script: |
       mkdir triggersrc
       ls -I "triggersrc" | xargs cp -rf -t triggersrc
@@ -119,3 +120,14 @@ jobs:
       GITHUB_TOKEN: $(GITHUB_TOKEN)
       PRERELEASE: true
       RELEASE_TAG: unstable-$(Build.SourceVersion)
+  - script: |
+      cd ./src/v2ray.com/core
+      echo $RELEASE_TAG
+      ./release/tagrelease.sh
+    workingDirectory: '$(GOPATH)'
+    displayName: 'Generate Tag Release'
+    env:
+      GITHUB_TOKEN: $(GITHUB_TOKEN)
+      PRERELEASE: true
+      RELEASE_TAG: unstable-$(Build.SourceVersion)
+      TRIGGER_REASON: $(Build.SourceBranch)
