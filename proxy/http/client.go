@@ -16,6 +16,7 @@ import (
 	"v2ray.com/core"
 	"v2ray.com/core/common"
 	"v2ray.com/core/common/buf"
+	"v2ray.com/core/common/bytespool"
 	"v2ray.com/core/common/net"
 	"v2ray.com/core/common/protocol"
 	"v2ray.com/core/common/retry"
@@ -71,6 +72,7 @@ func (c *Client) Process(ctx context.Context, link *transport.Link, dialer inter
 		return newError("target not specified.")
 	}
 	target := outbound.Target
+	targetAddr := target.NetAddr()
 
 	if target.Network == net.Network_UDP {
 		return newError("UDP is not supported by HTTP outbound")
@@ -79,13 +81,21 @@ func (c *Client) Process(ctx context.Context, link *transport.Link, dialer inter
 	var user *protocol.MemoryUser
 	var conn internet.Connection
 
+	mbuf, _ := link.Reader.ReadMultiBuffer()
+	len := mbuf.Len()
+	firstPayload := bytespool.Alloc(len)
+	mbuf, _ = buf.SplitBytes(mbuf, firstPayload)
+	firstPayload = firstPayload[:len]
+
+	buf.ReleaseMulti(mbuf)
+	defer bytespool.Free(firstPayload)
+
 	if err := retry.ExponentialBackoff(5, 100).On(func() error {
 		server := c.serverPicker.PickServer()
 		dest := server.Destination()
 		user = server.PickUser()
-		targetAddr := target.NetAddr()
 
-		netConn, err := setUpHttpTunnel(ctx, dest, targetAddr, user, dialer)
+		netConn, err := setUpHTTPTunnel(ctx, dest, targetAddr, user, dialer, firstPayload)
 		if netConn != nil {
 			conn = internet.Connection(netConn)
 		}
@@ -125,29 +135,31 @@ func (c *Client) Process(ctx context.Context, link *transport.Link, dialer inter
 	return nil
 }
 
-// setUpHttpTunnel will create a socket tunnel via HTTP CONNECT method
-func setUpHttpTunnel(ctx context.Context, dest net.Destination, target string, user *protocol.MemoryUser, dialer internet.Dialer) (net.Conn, error) {
-	req := (&http.Request{
-		Method: "CONNECT",
+// setUpHTTPTunnel will create a socket tunnel via HTTP CONNECT method
+func setUpHTTPTunnel(ctx context.Context, dest net.Destination, target string, user *protocol.MemoryUser, dialer internet.Dialer, firstPayload []byte) (net.Conn, error) {
+	req := &http.Request{
+		Method: http.MethodConnect,
 		URL:    &url.URL{Host: target},
 		Header: make(http.Header),
 		Host:   target,
-	}).WithContext(ctx)
+	}
 
 	if user != nil && user.Account != nil {
 		account := user.Account.(*Account)
 		auth := account.GetUsername() + ":" + account.GetPassword()
 		req.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(auth)))
 	}
-	req.Header.Set("Proxy-Connection", "Keep-Alive")
 
-	connectHttp1 := func(rawConn net.Conn) (net.Conn, error) {
-		req.Proto = "HTTP/1.1"
-		req.ProtoMajor = 1
-		req.ProtoMinor = 1
+	connectHTTP1 := func(rawConn net.Conn) (net.Conn, error) {
+		req.Header.Set("Proxy-Connection", "Keep-Alive")
 
 		err := req.Write(rawConn)
 		if err != nil {
+			rawConn.Close()
+			return nil, err
+		}
+
+		if _, err := rawConn.Write(firstPayload); err != nil {
 			rawConn.Close()
 			return nil, err
 		}
@@ -165,12 +177,18 @@ func setUpHttpTunnel(ctx context.Context, dest net.Destination, target string, u
 		return rawConn, nil
 	}
 
-	connectHttp2 := func(rawConn net.Conn, h2clientConn *http2.ClientConn) (net.Conn, error) {
-		req.Proto = "HTTP/2.0"
-		req.ProtoMajor = 2
-		req.ProtoMinor = 0
+	connectHTTP2 := func(rawConn net.Conn, h2clientConn *http2.ClientConn) (net.Conn, error) {
 		pr, pw := io.Pipe()
 		req.Body = pr
+
+		var pErr error
+		var wg sync.WaitGroup
+		wg.Add(1)
+
+		go func() {
+			_, pErr = pw.Write(firstPayload)
+			wg.Done()
+		}()
 
 		resp, err := h2clientConn.RoundTrip(req)
 		if err != nil {
@@ -178,28 +196,31 @@ func setUpHttpTunnel(ctx context.Context, dest net.Destination, target string, u
 			return nil, err
 		}
 
+		wg.Wait()
+		if pErr != nil {
+			rawConn.Close()
+			return nil, pErr
+		}
+
 		if resp.StatusCode != http.StatusOK {
 			rawConn.Close()
 			return nil, newError("Proxy responded with non 200 code: " + resp.Status)
 		}
-		return newHttp2Conn(rawConn, pw, resp.Body), nil
+		return newHTTP2Conn(rawConn, pw, resp.Body), nil
 	}
 
 	cachedH2Mutex.Lock()
 	defer cachedH2Mutex.Unlock()
 
 	if cachedConn, found := cachedH2Conns[dest]; found {
-		if cachedConn.rawConn != nil && cachedConn.h2Conn != nil {
-			rc := cachedConn.rawConn
-			cc := cachedConn.h2Conn
-			if cc.CanTakeNewRequest() {
-				proxyConn, err := connectHttp2(rc, cc)
-				if err != nil {
-					return nil, err
-				}
-
-				return proxyConn, nil
+		rc, cc := cachedConn.rawConn, cachedConn.h2Conn
+		if cc.CanTakeNewRequest() {
+			proxyConn, err := connectHTTP2(rc, cc)
+			if err != nil {
+				return nil, err
 			}
+
+			return proxyConn, nil
 		}
 	}
 
@@ -208,8 +229,13 @@ func setUpHttpTunnel(ctx context.Context, dest net.Destination, target string, u
 		return nil, err
 	}
 
+	iConn := rawConn
+	if statConn, ok := iConn.(*internet.StatCouterConnection); ok {
+		iConn = statConn.Connection
+	}
+
 	nextProto := ""
-	if tlsConn, ok := rawConn.(*tls.Conn); ok {
+	if tlsConn, ok := iConn.(*tls.Conn); ok {
 		if err := tlsConn.Handshake(); err != nil {
 			rawConn.Close()
 			return nil, err
@@ -218,10 +244,8 @@ func setUpHttpTunnel(ctx context.Context, dest net.Destination, target string, u
 	}
 
 	switch nextProto {
-	case "":
-		fallthrough
-	case "http/1.1":
-		return connectHttp1(rawConn)
+	case "", "http/1.1":
+		return connectHTTP1(rawConn)
 	case "h2":
 		t := http2.Transport{}
 		h2clientConn, err := t.NewClientConn(rawConn)
@@ -230,7 +254,7 @@ func setUpHttpTunnel(ctx context.Context, dest net.Destination, target string, u
 			return nil, err
 		}
 
-		proxyConn, err := connectHttp2(rawConn, h2clientConn)
+		proxyConn, err := connectHTTP2(rawConn, h2clientConn)
 		if err != nil {
 			rawConn.Close()
 			return nil, err
@@ -251,7 +275,7 @@ func setUpHttpTunnel(ctx context.Context, dest net.Destination, target string, u
 	}
 }
 
-func newHttp2Conn(c net.Conn, pipedReqBody *io.PipeWriter, respBody io.ReadCloser) net.Conn {
+func newHTTP2Conn(c net.Conn, pipedReqBody *io.PipeWriter, respBody io.ReadCloser) net.Conn {
 	return &http2Conn{Conn: c, in: pipedReqBody, out: respBody}
 }
 
@@ -271,18 +295,6 @@ func (h *http2Conn) Write(p []byte) (n int, err error) {
 
 func (h *http2Conn) Close() error {
 	h.in.Close()
-	return h.out.Close()
-}
-
-func (h *http2Conn) CloseConn() error {
-	return h.Conn.Close()
-}
-
-func (h *http2Conn) CloseWrite() error {
-	return h.in.Close()
-}
-
-func (h *http2Conn) CloseRead() error {
 	return h.out.Close()
 }
 
