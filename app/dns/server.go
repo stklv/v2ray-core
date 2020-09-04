@@ -114,8 +114,7 @@ func New(ctx context.Context, config *Config) (*Server, error) {
 				log.Fatalln(newError("DNS config error").Base(err))
 			}
 			server.clients = append(server.clients, NewDoHLocalNameServer(u, server.clientIP))
-		} else if address.Family().IsDomain() &&
-			strings.HasPrefix(address.Domain(), "https://") {
+		} else if address.Family().IsDomain() && strings.HasPrefix(address.Domain(), "https://") {
 			// DOH Remote mode
 			u, err := url.Parse(address.Domain())
 			if err != nil {
@@ -229,6 +228,7 @@ func New(ctx context.Context, config *Config) (*Server, error) {
 
 	if len(server.clients) == 0 {
 		server.clients = append(server.clients, NewLocalNameServer())
+		server.ipIndexMap = append(server.ipIndexMap, nil)
 	}
 
 	return server, nil
@@ -256,7 +256,10 @@ func (s *Server) IsOwnLink(ctx context.Context) bool {
 
 // Match check dns ip match geoip
 func (s *Server) Match(idx int, client Client, domain string, ips []net.IP) ([]net.IP, error) {
-	matcher := s.ipIndexMap[idx]
+	var matcher *MultiGeoIPMatcher
+	if idx < len(s.ipIndexMap) {
+		matcher = s.ipIndexMap[idx]
+	}
 	if matcher == nil {
 		return ips, nil
 	}
@@ -379,8 +382,12 @@ func (s *Server) lookupIPInternal(domain string, option IPOption) ([]net.IP, err
 			domainRules = append(domainRules, fmt.Sprintf("%s(DNS idx:%d)", rule, info.clientIdx))
 			matchingDNS = append(matchingDNS, s.clients[info.clientIdx].Name())
 		}
-		newError("domain ", domain, " matching following rules: ", domainRules).AtDebug().WriteToLog()
-		newError("domain ", domain, " uses following DNS first: ", matchingDNS).AtDebug().WriteToLog()
+		if len(domainRules) > 0 {
+			newError("domain ", domain, " matches following rules: ", domainRules).AtDebug().WriteToLog()
+		}
+		if len(matchingDNS) > 0 {
+			newError("domain ", domain, " uses following DNS first: ", matchingDNS).AtDebug().WriteToLog()
+		}
 		for _, idx := range indices {
 			clientIdx := int(s.matcherInfos[idx].clientIdx)
 			matchedClient = s.clients[clientIdx]
