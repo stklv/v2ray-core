@@ -2,7 +2,9 @@ package conf
 
 import (
 	"encoding/json"
+	"runtime"
 	"strconv"
+	"syscall"
 
 	"github.com/golang/protobuf/proto"
 
@@ -35,7 +37,7 @@ func (c *VLessInboundConfig) Build() (proto.Message, error) {
 	config := new(inbound.Config)
 
 	if len(c.Clients) == 0 {
-		return nil, newError(`VLESS settings: "clients" is empty`)
+		//return nil, newError(`VLESS settings: "clients" is empty`)
 	}
 	config.Clients = make([]*protocol.User, len(c.Clients))
 	for idx, rawUser := range c.Clients {
@@ -48,9 +50,12 @@ func (c *VLessInboundConfig) Build() (proto.Message, error) {
 			return nil, newError(`VLESS clients: invalid user`).Base(err)
 		}
 
-		if account.Flow != "" {
-			return nil, newError(`VLESS clients: "flow" is not available in this version`)
+		switch account.Flow {
+		case "", "xtls-rprx-origin", "xtls-rprx-direct":
+		default:
+			return nil, newError(`VLESS clients: "flow" doesn't support "` + account.Flow + `" in this version`)
 		}
+
 		if account.Encryption != "" {
 			return nil, newError(`VLESS clients: "encryption" should not in inbound settings`)
 		}
@@ -99,6 +104,11 @@ func (c *VLessInboundConfig) Build() (proto.Message, error) {
 				switch fb.Dest[0] {
 				case '@', '/':
 					fb.Type = "unix"
+					if fb.Dest[0] == '@' && len(fb.Dest) > 1 && fb.Dest[1] == '@' && runtime.GOOS == "linux" {
+						fullAddr := make([]byte, len(syscall.RawSockaddrUnix{}.Path)) // may need padding to work in front of haproxy
+						copy(fullAddr, fb.Dest[1:])
+						fb.Dest = string(fullAddr)
+					}
 				default:
 					if _, err := strconv.Atoi(fb.Dest); err == nil {
 						fb.Dest = "127.0.0.1:" + fb.Dest
@@ -161,9 +171,12 @@ func (c *VLessOutboundConfig) Build() (proto.Message, error) {
 				return nil, newError(`VLESS users: invalid user`).Base(err)
 			}
 
-			if account.Flow != "" {
-				return nil, newError(`VLESS users: "flow" is not available in this version`)
+			switch account.Flow {
+			case "", "xtls-rprx-origin", "xtls-rprx-origin-udp443", "xtls-rprx-direct", "xtls-rprx-direct-udp443":
+			default:
+				return nil, newError(`VLESS users: "flow" doesn't support "` + account.Flow + `" in this version`)
 			}
+
 			if account.Encryption != "none" {
 				return nil, newError(`VLESS users: please add/set "encryption":"none" for every user`)
 			}
