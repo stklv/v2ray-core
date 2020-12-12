@@ -2,14 +2,18 @@ name: Build debian packages
 
 on:
   push:
-    branches: [master]
+    branches:
+      - master
+      - v*
     paths:
       - "**/*.go"
+      - "go.mod"
+      - "go.sum"
   release:
     types: [prereleased]
 
 jobs:
-  build:
+  package:
     if: github.repository == 'v2fly/v2ray-core'
     runs-on: ubuntu-latest
     container: debian:sid
@@ -48,8 +52,9 @@ jobs:
         if: github.event_name == 'release'
         run: |
           git clone https://github.com/v2fly/debian.git archive
-          echo ${{ secrets.DEBIAN_GPG_PRIVE }} | base64 -d > private.key
-          gpg --import private.key
+          echo ${{ secrets.DEBIAN_GPG_PRIVATE }} | base64 -d > private.key
+          gpg --import --batch private.key
+          gpg -K
           cd archive
           git config --local user.name "${{ github.actor }}"
           git config --local user.email "${{ github.actor }}@users.noreply.github.com"
