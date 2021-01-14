@@ -12,7 +12,7 @@ require (
 	github.com/miekg/dns v1.1.35
 	github.com/pires/go-proxyproto v0.3.3
 	github.com/seiflotfy/cuckoofilter v0.0.0-20201009151232-afb285a456ab
-	github.com/stretchr/testify v1.6.1
+	github.com/stretchr/testify v1.7.0
 	github.com/v2fly/VSign v0.0.0-20201108000810-e2adc24bf848
 	go.starlark.net v0.0.0-20201118183435-e55f603d8c79
 	golang.org/x/crypto v0.0.0-20201124201722-c8d3bf9c5392
