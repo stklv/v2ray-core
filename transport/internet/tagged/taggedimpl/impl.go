@@ -4,6 +4,7 @@ package taggedimpl
 
 import (
 	"context"
+
 	core "github.com/v2fly/v2ray-core/v4"
 	"github.com/v2fly/v2ray-core/v4/common/net"
 	"github.com/v2fly/v2ray-core/v4/common/session"
@@ -13,6 +14,9 @@ import (
 
 func DialTaggedOutbound(ctx context.Context, dest net.Destination, tag string) (net.Conn, error) {
 	var dispatcher routing.Dispatcher
+	if core.FromContext(ctx) == nil {
+		return nil, newError("Instance context variable is not in context, dial denied. ")
+	}
 	if err := core.RequireFeatures(ctx, func(dispatcherInstance routing.Dispatcher) {
 		dispatcher = dispatcherInstance
 	}); err != nil {
@@ -23,7 +27,7 @@ func DialTaggedOutbound(ctx context.Context, dest net.Destination, tag string) (
 	content.SkipDNSResolve = true
 
 	ctx = session.ContextWithContent(ctx, content)
-	session.SetForcedOutboundTagToContext(ctx, tag)
+	ctx = session.SetForcedOutboundTagToContext(ctx, tag)
 
 	r, err := dispatcher.Dispatch(ctx, dest)
 	if err != nil {

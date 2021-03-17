@@ -70,13 +70,15 @@ func (rr *RoutingRule) BuildCondition() (Condition, error) {
 
 	if len(rr.Domain) > 0 {
 		switch rr.DomainMatcher {
-		case "ac":
-			matcher, err := NewACAutomatonDomainMatcher(rr.Domain)
+		case "mph", "hybrid":
+			matcher, err := NewMphMatcherGroup(rr.Domain)
 			if err != nil {
-				return nil, newError("failed to build domain condition with ACAutomatonDomainMatcher").Base(err)
+				return nil, newError("failed to build domain condition with MphDomainMatcher").Base(err)
 			}
-			newError("ACAutomatonDomainMatcher is enabled for ", len(rr.Domain), "domain rules(s)").AtDebug().WriteToLog()
+			newError("MphDomainMatcher is enabled for ", len(rr.Domain), " domain rule(s)").AtDebug().WriteToLog()
 			conds.Add(matcher)
+		case "linear":
+			fallthrough
 		default:
 			matcher, err := NewDomainMatcher(rr.Domain)
 			if err != nil {
@@ -84,7 +86,6 @@ func (rr *RoutingRule) BuildCondition() (Condition, error) {
 			}
 			conds.Add(matcher)
 		}
-
 	}
 
 	if len(rr.UserEmail) > 0 {
